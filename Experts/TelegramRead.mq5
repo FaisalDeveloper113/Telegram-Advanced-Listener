@@ -4,12 +4,30 @@
 #property strict
 #include <Telegram.mqh>
 #include <Trade\Trade.mqh>
+#define MaxOrders 100
+
+struct Order_Struct
+  {
+   ulong             ticket;
+   string            symbol;
+   ENUM_POSITION_TYPE   order_type;
+   double            initial_lot;
+   double            stoploss;
+   bool              is_Tp1_hit;
+   double            Tp1;
+                     Order_Struct()
+     {
+      ticket = -1;
+     }
+  };
+Order_Struct Orders[MaxOrders];
 
 input int   Magic_Number = 113;  // MagicNumber
 input string InpToken = "6512679126:AAFSSuBPLl7q-FeSWZoRYnQW7oJHEx58aN8";
 input int InpTimerSeconds = 1; // Check every 10 seconds
 input string             suffix              = "";                                                      // Add Symbol Suffix
 input double  risk = 1; // Risk
+input double  tp1closeper = 50;  // Tp1 Close Percentage
 
 
 
@@ -103,6 +121,11 @@ void OnTimer()
   {
 // Simply call ReadMessages - all WebRequest logic is in Telegram.mqh
    bot.ReadMessages();
+   if(isNewBarM1())
+      print_orders_information();
+   close_orders_partials();
+   TakePorfit_Trailing();
+   remove_closed_order_from_struct();
   }
 
 //+------------------------------------------------------------------+
@@ -160,12 +183,12 @@ void ExecuteTrade(string signal)
 
    if(TYPE == POSITION_TYPE_BUY)
      {
-      ulong ticket = place_market_buy(SYMBOL,SL,TP2);
+      ulong ticket = place_market_buy(SYMBOL,SL,TP1,TP2);
       Print("Buy Trade Tikcet : ", ticket);
      }
    if(TYPE == POSITION_TYPE_SELL)
      {
-      ulong ticket = place_market_sell(SYMBOL,SL,TP2);
+      ulong ticket = place_market_sell(SYMBOL,SL,TP1,TP2);
       Print("Sell Trade Tikcet : ", ticket);
      }
 
@@ -176,7 +199,7 @@ void ExecuteTrade(string signal)
 //+------------------------------------------------------------------+
 //|                                                                  |
 //+------------------------------------------------------------------+
-ulong  place_market_buy(string orderSymbol, double sl, double tp)
+ulong  place_market_buy(string orderSymbol, double sl, double tp1,double tp)
   {
    orderSymbol = orderSymbol + suffix;
    double  Ask = SymbolInfoDouble(orderSymbol,SYMBOL_ASK);
@@ -194,12 +217,14 @@ ulong  place_market_buy(string orderSymbol, double sl, double tp)
      {
       Print("Buy() method executed successfully. Return code=",trade.ResultRetcode(),
             " (",trade.ResultRetcodeDescription(),")");
+      if(store_order_information(trade.ResultOrder(),orderSymbol,POSITION_TYPE_BUY,lot,sl,Ask + tp1))
+         Print("Order Stored Successfuly!!");
       return trade.ResultOrder();
      }
    return 0;
   }
 //+------------------------------------------------------------------+
-ulong  place_market_sell(string orderSymbol, double sl, double tp)
+ulong  place_market_sell(string orderSymbol, double sl,double tp1, double tp)
   {
    orderSymbol = orderSymbol + suffix;
    double  Ask = SymbolInfoDouble(orderSymbol,SYMBOL_ASK);
@@ -217,6 +242,8 @@ ulong  place_market_sell(string orderSymbol, double sl, double tp)
      {
       Print("Sell() method executed successfully. Return code=",trade.ResultRetcode(),
             " (",trade.ResultRetcodeDescription(),")");
+      if(store_order_information(trade.ResultOrder(),orderSymbol,POSITION_TYPE_SELL,lot,sl,Bid - tp1))
+         Print("Order Stored Successfuly!!");
       return trade.ResultOrder();
      }
    return 0;
@@ -346,4 +373,191 @@ double getlot(string symbol, double stop_loss)
 //---
    return lotSize;
   }
+//+------------------------------------------------------------------+
+bool store_order_information(ulong ticket,string symbol, ENUM_POSITION_TYPE type, double lot, double sl, double tp1)
+  {
+   for(int i=0; i<MaxOrders; i++)
+     {
+      if(Orders[i].ticket == -1)
+        {
+         Orders[i].ticket = ticket;
+         Orders[i].symbol = symbol;
+         Orders[i].order_type = type;
+         Orders[i].initial_lot = lot;
+         Orders[i].stoploss = sl;
+         Orders[i].is_Tp1_hit = false;
+         Orders[i].Tp1 = tp1;
+         return true;
+        }
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void print_orders_information()
+  {
+   for(int i=0; i<MaxOrders; i++)
+     {
+      if(Orders[i].ticket != -1)
+        {
+         Print("[",i,"] --> Ticket: ", Orders[i].ticket," Symbol: ",Orders[i].symbol, " Lot: ", Orders[i].initial_lot, " SL : ", Orders[i].stoploss, " Tp1Hit: ", Orders[i].is_Tp1_hit,
+               " Tp1: ", Orders[i].Tp1);
+        }
+     }
+  }
+//+------------------------------------------------------------------+
+bool isNewBarM1()
+  {
+   static datetime last_time=0;
+   datetime lastbar_time=(datetime)SeriesInfoInteger(Symbol(),PERIOD_M1,SERIES_LASTBAR_DATE);
+
+   if(last_time==0)
+     {
+      last_time=lastbar_time;
+      return(false);
+     }
+
+   if(last_time!=lastbar_time)
+     {
+      last_time=lastbar_time;
+      Print("<><><><><>NEW Bar M1 : ",lastbar_time, "<><><><><>");
+      return(true);
+     }
+   return(false);
+  }
+//+------------------------------------------------------------------+
+void remove_closed_order_from_struct()
+  {
+   if(PositionsTotal() > 0)
+      return;
+   bool isOrderRunning;
+   for(int x=0; x<MaxOrders; x++)
+     {
+      if(Orders[x].ticket != -1)
+        {
+         ulong master_ticket = Orders[x].ticket;
+         isOrderRunning = false;
+         for(int i=PositionsTotal(); i>0; i--)
+           {
+            ulong ticket = PositionGetTicket(i);
+
+            if(PositionSelectByTicket(ticket))
+              {
+               if(PositionGetInteger(POSITION_MAGIC) == Magic_Number)
+                 {
+                  if((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY) || (PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_SELL))
+                    {
+                     Print("Ticket : ", ticket, " masterTicket : ", master_ticket);
+                     if(ticket == master_ticket)
+                        isOrderRunning = true;
+                    }
+                 }
+              }
+           }
+         if(!isOrderRunning)
+           {
+            Print("Tikcet : ", Orders[x].ticket, " Has been Closed !! Removing from Struct !!");
+            Orders[x].ticket = -1;
+           }
+
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void TakePorfit_Trailing()
+  {
+   for(int i=0; i<MaxOrders; i++)
+     {
+      if(Orders[i].ticket != -1)
+        {
+         if(Orders[i].is_Tp1_hit)
+           {
+            if(PositionSelectByTicket(Orders[i].ticket))
+              {
+               double stoploss = PositionGetDouble(POSITION_SL);
+               double newStopLoss = PositionGetDouble(POSITION_PRICE_OPEN);
+               double takeprofit = PositionGetDouble(POSITION_TP);
+               stoploss = NormalizeDouble(stoploss,Digits());
+               newStopLoss = NormalizeDouble(newStopLoss,Digits());
+               if(stoploss != newStopLoss)
+                 {
+                  if(!trade.PositionModify(Orders[i].ticket,newStopLoss,takeprofit))
+                    {
+                     if(!trade.PositionModify(Orders[i].ticket,newStopLoss,takeprofit))
+                       {
+                        Print("Tp2 SL : ", GetLastError());
+                        Print("Ticket: ", Orders[i].ticket);
+                       }
+                    }
+                 }
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void close_orders_partials()
+  {
+   for(int i=0; i<MaxOrders; i++)
+     {
+      if(Orders[i].ticket != -1)
+        {
+         double Ask = SymbolInfoDouble(Orders[i].symbol,SYMBOL_ASK);
+         double Bid = SymbolInfoDouble(Orders[i].symbol,SYMBOL_BID);
+
+         if(Orders[i].order_type == POSITION_TYPE_BUY)
+           {
+            if(Bid >= Orders[i].Tp1 && !Orders[i].is_Tp1_hit &&  Orders[i].Tp1 != 0)
+              {
+               if(PositionSelectByTicket(Orders[i].ticket))
+                 {
+                  double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                  double volume = PositionGetDouble(POSITION_VOLUME);
+                  double sl = PositionGetDouble(POSITION_SL);
+                  double tp = PositionGetDouble(POSITION_TP);
+                  double lot_to_close = volume * (tp1closeper/100);
+                  lot_to_close = NormalizeDouble(lot_to_close,2);
+                  if(trade.PositionClosePartial(Orders[i].ticket,lot_to_close,1))
+                    {
+                     Print("Ticket : ", Orders[i].ticket, " Tp1 Closed !!");
+                     Orders[i].is_Tp1_hit = true;
+                     Orders[i].initial_lot = lot_to_close;
+                    }
+                 }
+              }
+
+           }
+         if(Orders[i].order_type == POSITION_TYPE_SELL)
+           {
+            if(Ask <= Orders[i].Tp1 && !Orders[i].is_Tp1_hit && Orders[i].Tp1 != 0)
+              {
+               if(PositionSelectByTicket(Orders[i].ticket))
+                 {
+                  double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                  double volume = PositionGetDouble(POSITION_VOLUME);
+                  double sl = PositionGetDouble(POSITION_SL);
+                  double tp = PositionGetDouble(POSITION_TP);
+                  double lot_to_close = volume * (tp1closeper/100);
+                  lot_to_close = NormalizeDouble(lot_to_close,2);
+                  if(trade.PositionClosePartial(Orders[i].ticket,lot_to_close,1))
+                    {
+                     Print("Ticket : ", Orders[i].ticket, " Tp1 Closed !!");
+                     Orders[i].is_Tp1_hit = true;
+                     Orders[i].initial_lot = lot_to_close;
+                    }
+                 }
+              }
+           }
+        }
+     }
+  }
+//+--------------
 //+------------------------------------------------------------------+
